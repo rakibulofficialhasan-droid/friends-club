@@ -1,3 +1,4 @@
+
 {
   "id": "/",
   "name": "Friends Club",
@@ -8,5 +9,19 @@
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0b1220",
-  "theme_color": "#123b4a"
+  "theme_color": "#123b4a",
+  "icons": [
+    {
+      "src": "/launchericon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/launchericon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
 }
