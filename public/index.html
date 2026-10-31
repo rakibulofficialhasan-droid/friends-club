@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="bn">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Friends Club</title>
+<style>
+:root{--bg:#0b1220;--panel:#121d30;--panel2:#18263d;--accent:#27c49a;--text:#eef5ff;--muted:#9eb0c8;--line:#293a55}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,-apple-system,Segoe UI,sans-serif}
+header{padding:16px;background:linear-gradient(120deg,#123b4a,#17223d);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
+.logo{width:42px;height:42px;border-radius:14px;background:var(--accent);color:#05251d;display:grid;place-items:center;font-weight:900;font-size:21px}
+h1{font-size:20px;margin:0}header p{margin:3px 0 0;color:var(--muted);font-size:12px}
+main{max-width:900px;margin:auto;padding:14px}.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap}input,button{font:inherit;border-radius:10px;padding:11px;border:1px solid var(--line)}input{background:#0c1627;color:var(--text);min-width:0;flex:1}button{background:var(--accent);color:#05251d;border:0;font-weight:700;cursor:pointer}button.secondary{background:var(--panel2);color:var(--text);border:1px solid var(--line)}button:disabled{opacity:.5}
+#status{font-size:13px;color:var(--muted);margin-top:8px}.messages{height:42vh;min-height:240px;overflow:auto;display:flex;flex-direction:column;gap:8px;padding:4px}
+.msg{background:var(--panel2);padding:10px 12px;border-radius:12px;max-width:90%;overflow-wrap:anywhere}.msg.mine{align-self:flex-end;background:#145747}.meta{font-size:11px;color:var(--muted);margin-bottom:4px}.msg img,.msg video{max-width:100%;max-height:260px;border-radius:8px;display:block;margin-top:6px}
+.small{font-size:12px;color:var(--muted)}.tools{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.hidden{display:none}#callArea video{width:48%;max-height:240px;background:#05080e;border-radius:12px}#callArea{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+footer{text-align:center;color:var(--muted);font-size:11px;padding:16px}
+</style>
+</head>
+<body>
+<header><div class="logo">FC</div><div><h1>Friends Club</h1><p>Private friends chat · নিজের ফোনের সার্ভারে চালানোর প্রোটোটাইপ</p></div></header>
+<main>
+<section class="card">
+ <div class="row"><input id="server" placeholder="Server URL, যেমন http://192.168.1.10:3000" value="http://localhost:3000"><button id="connect">Connect</button></div>
+ <div class="row" style="margin-top:8px"><input id="name" placeholder="তোমার নাম"><input id="room" placeholder="Room code" value="friends"></div>
+ <div id="status">প্রথমে সার্ভার চালু করে Connect চাপো। অন্য ফোন থেকে একই সার্ভার URL দিতে হবে।</div>
+</section>
+<section class="card">
+ <div class="messages" id="messages"><div class="small">এখনো কোনো মেসেজ নেই।</div></div>
+ <div class="row" style="margin-top:10px"><input id="text" placeholder="মেসেজ লিখো..." autocomplete="off"><button id="send">Send</button></div>
+ <div class="tools"><label class="secondary" style="padding:9px 12px;border-radius:10px;cursor:pointer">📎 ছবি/ভিডিও<input id="file" type="file" accept="image/*,video/*" hidden></label><button class="secondary" id="voice">🎙️ Audio call</button><button class="secondary" id="videoCall">📹 Video call</button><button class="secondary" id="hangup">End call</button></div>
+ <div id="callArea" class="hidden"><video id="localVideo" autoplay muted playsinline></video><video id="remoteVideo" autoplay playsinline></video></div>
+ <p class="small">কলের জন্য HTTPS বা localhost প্রয়োজন হতে পারে। এই প্রোটোটাইপে কল সিগন্যালিং আছে; নেটওয়ার্ক/রাউটার অনুযায়ী TURN relay লাগতে পারে।</p>
+</section>
+<section class="card"><strong>ব্যবহার নির্দেশনা</strong><p class="small">১) সার্ভার চালু করো। ২) নিজের ফোনে সার্ভারের ঠিকানা দিয়ে Connect করো। ৩) বন্ধুদের ফোনেও একই সার্ভার ঠিকানা, Room code ও আলাদা নাম ব্যবহার করতে বলো। একই Wi‑Fi-তে LAN IP ব্যবহার করা যায়। মোবাইল ডাটা দিয়ে বাইরে থেকে সংযোগের জন্য আলাদা network access setup লাগতে পারে।</p></section>
+</main><footer>Friends Club · প্রাথমিক সংস্করণ · বাস্তব ব্যবহারের আগে নিরাপত্তা ও অ্যাকাউন্ট ব্যবস্থা যোগ করতে হবে</footer>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const $=id=>document.getElementById(id);let socket=null,pc=null,localStream=null,room='friends',name='Friend';
+function status(t){$('status').textContent=t}
+function addMsg(m){const box=$('messages');if(box.querySelector('.small')&&box.children.length===1)box.innerHTML='';const d=document.createElement('div');d.className='msg'+(m.id===socket?.id?' mine':'');const meta=document.createElement('div');meta.className='meta';meta.textContent=(m.name||'Friend')+' · '+new Date(m.time||Date.now()).toLocaleTimeString();d.appendChild(meta);if(m.text){const p=document.createElement('div');p.textContent=m.text;d.appendChild(p)}if(m.fileUrl){if((m.mime||'').startsWith('image/')){const im=document.createElement('img');im.src=m.fileUrl;im.alt='shared image';d.appendChild(im)}else if((m.mime||'').startsWith('video/')){const v=document.createElement('video');v.src=m.fileUrl;v.controls=true;d.appendChild(v)}else{const a=document.createElement('a');a.href=m.fileUrl;a.textContent='ফাইল দেখুন';a.target='_blank';d.appendChild(a)}}box.appendChild(d);box.scrollTop=box.scrollHeight}
+$('connect').onclick=()=>{if(typeof io!=='function'){status('Socket.IO লোড হয়নি। সার্ভার URL ও সার্ভার চালু আছে কি না দেখো।');return}name=$('name').value.trim()||'Friend';room=$('room').value.trim()||'friends';const url=$('server').value.trim().replace(/\/$/,'');if(socket)socket.disconnect();socket=io(url,{transports:['websocket','polling']});socket.on('connect',()=>{socket.emit('join',{name,room});status('Connected · '+socket.id+' · Room: '+room)});socket.on('connect_error',e=>status('সংযোগ ব্যর্থ: '+e.message));socket.on('history',items=>items.forEach(addMsg));socket.on('chat',addMsg);socket.on('notice',t=>status(t));socket.on('signal',async data=>{try{if(data.type==='offer'){await ensurePC();await pc.setRemoteDescription(data);const ans=await pc.createAnswer();await pc.setLocalDescription(ans);socket.emit('signal',{room,to:data.from,type:ans.type,sdp:ans.sdp,from:socket.id})}else if(data.type==='answer'){await pc.setRemoteDescription(data)}else if(data.candidate&&pc){await pc.addIceCandidate(data.candidate)}}catch(e){status('কল সংযোগ সমস্যা: '+e.message)}})};
+$('send').onclick=sendText;$('text').addEventListener('keydown',e=>{if(e.key==='Enter')sendText()});
+function sendText(){const text=$('text').value.trim();if(!text)return;if(!socket?.connected){status('আগে Connect করো।');return}socket.emit('chat',{room,name,text});$('text').value=''}
+$('file').onchange=async e=>{const f=e.target.files[0];if(!f)return;if(!socket?.connected){status('আগে Connect করো।');e.target.value='';return}if(f.size>20*1024*1024){status('ফাইল সর্বোচ্চ 20 MB হতে পারবে।');e.target.value='';return}const fd=new FormData();fd.append('file',f);try{const r=await fetch(($('server').value.trim().replace(/\/$/,''))+'/upload',{method:'POST',body:fd});if(!r.ok)throw Error(await r.text());const data=await r.json();socket.emit('chat',{room,name,fileUrl:data.url,mime:f.type,fileName:f.name,text:''});status('ফাইল পাঠানো হয়েছে')}catch(err){status('ফাইল পাঠানো যায়নি: '+err.message)}e.target.value=''};
+async function ensurePC(){if(pc)return pc;pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});pc.onicecandidate=e=>{if(e.candidate)socket.emit('signal',{room,to:null,from:socket.id,candidate:e.candidate})};pc.ontrack=e=>{$('remoteVideo').srcObject=e.streams[0];$('callArea').classList.remove('hidden')};if(localStream)localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));return pc}
+async function startCall(video){if(!socket?.connected){status('আগে Connect করো।');return}try{localStream=await navigator.mediaDevices.getUserMedia({audio:true,video});$('localVideo').srcObject=localStream;$('callArea').classList.remove('hidden');await ensurePC();const offer=await pc.createOffer();await pc.setLocalDescription(offer);socket.emit('signal',{room,to:null,from:socket.id,type:offer.type,sdp:offer.sdp});status('কল অফার পাঠানো হয়েছে। একই রুমের অন্য সদস্যকে গ্রহণের ব্যবস্থা পরবর্তী সংস্করণে যোগ করতে হবে।')}catch(e){status('মাইক্রোফোন/ক্যামেরা চালু হয়নি: '+e.message)}}
+$('voice').onclick=()=>startCall(false);$('videoCall').onclick=()=>startCall(true);$('hangup').onclick=()=>{if(pc){pc.close();pc=null}if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null}$('localVideo').srcObject=null;$('remoteVideo').srcObject=null;$('callArea').classList.add('hidden');status('কল শেষ হয়েছে')};
+</script></body></html>
