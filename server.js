@@ -1,7 +1,6 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
-const fs = require('fs');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
@@ -45,7 +44,7 @@ const uploadDir = path.join(__dirname, 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
 app.use(express.static(publicDir));
 
-const safeUser = u => ({ id: String(u.id), name: u.name, email: u.email });
+const safeUser = u => ({ id: String(u.id), name: u.name, email: u.email, avatarUrl: u.avatar_url || u.avatarUrl || '' });
 const requireLogin = (req, res, next) =>
   req.session.user ? next() : res.status(401).json({ error: 'প্রথমে লগইন করো।' });
 
@@ -55,6 +54,7 @@ async function init() {
       id BIGSERIAL PRIMARY KEY,
       name VARCHAR(40) NOT NULL,
       email VARCHAR(254) UNIQUE NOT NULL,
+      avatar_url TEXT NOT NULL DEFAULT '',
       password_hash TEXT NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
@@ -77,6 +77,13 @@ async function init() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS chat_messages_room_id_idx ON chat_messages(room, id DESC);
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS stored_files (
+      id BIGSERIAL PRIMARY KEY, owner_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      room VARCHAR(140) NOT NULL, file_name VARCHAR(200) NOT NULL, mime VARCHAR(100) NOT NULL,
+      bytes BYTEA NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS stored_files_room_idx ON stored_files(room, id);
   `);
 }
 
@@ -95,7 +102,7 @@ app.post('/api/signup', async (req, res) => {
 
     const hash = await bcrypt.hash(password, 12);
     const q = await pool.query(
-      'INSERT INTO users(name,email,password_hash) VALUES($1,$2,$3) RETURNING id,name,email',
+      'INSERT INTO users(name,email,password_hash) VALUES($1,$2,$3) RETURNING id,name,email,avatar_url',
       [name, email, hash]
     );
     req.session.regenerate(err => {
@@ -116,7 +123,7 @@ app.post('/api/login', async (req, res) => {
   try {
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
-    const q = await pool.query('SELECT id,name,email,password_hash FROM users WHERE email=$1', [email]);
+    const q = await pool.query('SELECT id,name,email,password_hash,avatar_url FROM users WHERE email=$1', [email]);
     const u = q.rows[0];
     if (!u || !(await bcrypt.compare(password, u.password_hash)))
       return res.status(401).json({ error: 'ইমেইল বা পাসওয়ার্ড সঠিক নয়।' });
@@ -155,7 +162,7 @@ app.post('/api/friends', requireLogin, async (req, res) => {
   try {
     const email = String(req.body.email || '').trim().toLowerCase();
     if (!email) return res.status(400).json({ error: 'বন্ধুর অ্যাকাউন্টের ইমেইল লিখো।' });
-    const q = await pool.query('SELECT id,name,email FROM users WHERE email=$1', [email]);
+    const q = await pool.query('SELECT id,name,email,avatar_url FROM users WHERE email=$1', [email]);
     const friend = q.rows[0];
     if (!friend) return res.status(404).json({ error: 'এই ইমেইলে কোনো অ্যাকাউন্ট পাওয়া যায়নি।' });
     if (String(friend.id) === String(req.session.user.id))
@@ -172,29 +179,75 @@ app.post('/api/friends', requireLogin, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'বন্ধুকে যোগ করা যায়নি।' }); }
 });
 
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadDir),
-  filename: (_req, file, cb) => {
-    const clean = path.basename(file.originalname).replace(/[^a-zA-Z0-9._-]/g, '_').slice(-120) || 'file';
-    cb(null, Date.now() + '-' + Math.random().toString(36).slice(2, 9) + '-' + clean);
-  }
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+function validRoomForUser(room, userId) {
+  if (room === 'group:friends') return Promise.resolve(true);
+  if (!room || !room.startsWith('dm:')) return Promise.resolve(false);
+  const ids = room.slice(3).split(':');
+  if (ids.length !== 2 || !ids.includes(String(userId))) return Promise.resolve(false);
+  const other = ids.find(x => x !== String(userId));
+  return areFriends(userId, other);
+}
+app.post('/upload', requireLogin, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'ফাইল পাওয়া যায়নি।' });
+    const room = String(req.body.room || '');
+    if (!(await validRoomForUser(room, req.session.user.id)))
+      return res.status(403).json({ error: 'এই চ্যাটে ফাইল পাঠানোর অনুমতি নেই।' });
+    const fileName = path.basename(req.file.originalname).slice(0, 200) || 'file';
+    const mime = String(req.file.mimetype || 'application/octet-stream').slice(0, 100);
+    const q = await pool.query(
+      'INSERT INTO stored_files(owner_id,room,file_name,mime,bytes) VALUES($1,$2,$3,$4,$5) RETURNING id',
+      [req.session.user.id, room, fileName, mime, req.file.buffer]
+    );
+    res.json({ url: '/api/files/' + q.rows[0].id, name: fileName, mime });
+  } catch (e) { console.error('Upload error:', e); res.status(500).json({ error: 'ফাইল সংরক্ষণ করা যায়নি।' }); }
 });
-const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } });
-app.post('/upload', requireLogin, upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'ফাইল পাওয়া যায়নি।' });
-  res.json({ url: '/uploads/' + encodeURIComponent(req.file.filename), name: req.file.originalname });
+app.get('/api/files/:id', requireLogin, async (req, res) => {
+  try {
+    if (!/^\d+$/.test(req.params.id)) return res.status(404).end();
+    const q = await pool.query('SELECT id,room,file_name,mime,bytes FROM stored_files WHERE id=$1', [req.params.id]);
+    const f = q.rows[0];
+    if (!f || !(f.room === 'profile' ? (await pool.query('SELECT 1 FROM users WHERE avatar_url=$1 LIMIT 1', ['/api/files/' + req.params.id])).rowCount > 0 : await validRoomForUser(f.room, req.session.user.id))) return res.status(404).send('ফাইল পাওয়া যায়নি।');
+    res.setHeader('Content-Type', f.mime || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(f.file_name)}`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(f.bytes);
+  } catch (e) { console.error('File read error:', e); res.status(500).end(); }
 });
-// Files are stored on the server's local disk; Render free instances may lose them on restart/redeploy.
-// The upload route is login-protected, but generated file URLs are not private access-controlled URLs.
-app.use('/uploads', express.static(uploadDir));
-
+app.post('/api/profile', requireLogin, async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim().slice(0, 40);
+    if (!name) return res.status(400).json({ error: 'নাম খালি রাখা যাবে না।' });
+    const avatarUrl = String(req.body.avatarUrl || '').slice(0, 500);
+    if (avatarUrl && !/^\/api\/files\/\d+$/.test(avatarUrl)) return res.status(400).json({ error: 'প্রোফাইল ছবির ঠিকানা সঠিক নয়।' });
+    if (avatarUrl) {
+      const f = await pool.query('SELECT owner_id,room,mime FROM stored_files WHERE id=$1', [avatarUrl.split('/').pop()]);
+      if (!f.rows[0] || String(f.rows[0].owner_id) !== String(req.session.user.id) || !String(f.rows[0].mime).startsWith('image/'))
+        return res.status(403).json({ error: 'এই ছবিটি প্রোফাইলে ব্যবহার করা যাবে না।' });
+    }
+    const q = await pool.query('UPDATE users SET name=$1,avatar_url=$2 WHERE id=$3 RETURNING id,name,email,avatar_url', [name, avatarUrl, req.session.user.id]);
+    req.session.user = safeUser(q.rows[0]);
+    await new Promise((resolve, reject) => req.session.save(err => err ? reject(err) : resolve()));
+    io.emit('profile_updated', req.session.user);
+    res.json({ user: req.session.user });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'প্রোফাইল আপডেট করা যায়নি।' }); }
+});
+app.post('/api/profile/photo', requireLogin, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file || !String(req.file.mimetype).startsWith('image/')) return res.status(400).json({ error: 'একটি ছবি নির্বাচন করো।' });
+    if (req.file.size > 5 * 1024 * 1024) return res.status(400).json({ error: 'প্রোফাইল ছবি সর্বোচ্চ ৫ MB হতে পারবে।' });
+    const q = await pool.query("INSERT INTO stored_files(owner_id,room,file_name,mime,bytes) VALUES($1,'profile',$2,$3,$4) RETURNING id", [req.session.user.id, path.basename(req.file.originalname).slice(0,200), req.file.mimetype, req.file.buffer]);
+    res.json({ url: '/api/files/' + q.rows[0].id });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'ছবি সংরক্ষণ করা যায়নি।' }); }
+});
 const io = new Server(server, { maxHttpBufferSize: 2e7 });
 io.engine.use(sessionMiddleware);
 io.use(async (socket, next) => {
   try {
     const u = socket.request.session?.user;
     if (!u) return next(new Error('প্রথমে লগইন করো।'));
-    const q = await pool.query('SELECT id,name,email FROM users WHERE id=$1', [u.id]);
+    const q = await pool.query('SELECT id,name,email,avatar_url FROM users WHERE id=$1', [u.id]);
     if (!q.rows[0]) return next(new Error('অ্যাকাউন্ট পাওয়া যায়নি।'));
     socket.data.user = safeUser(q.rows[0]);
     next();
@@ -217,8 +270,14 @@ function formatMessage(m) {
   };
 }
 
+const onlineUsers = new Map();
+function emitPresence() { io.emit('presence', Array.from(onlineUsers.keys())); }
 io.on('connection', socket => {
   const user = socket.data.user;
+  const uid = String(user.id);
+  onlineUsers.set(uid, (onlineUsers.get(uid) || 0) + 1);
+  emitPresence();
+  socket.emit('presence', Array.from(onlineUsers.keys()));
   socket.on('join', async () => {
     try {
       const group = 'group:friends';
@@ -273,13 +332,32 @@ io.on('connection', socket => {
       const mime = String(m.mime || '').slice(0, 100);
       const fileName = String(m.fileName || '').slice(0, 200);
       if (!text && !fileUrl) return;
-      if (fileUrl && !/^\/uploads\/[A-Za-z0-9._%\-]+$/.test(fileUrl)) return;
+      if (fileUrl && !/^\/api\/files\/\d+$/.test(fileUrl)) return;
+      if (fileUrl) {
+        const fileId = fileUrl.split('/').pop();
+        const f = await pool.query('SELECT room,mime,file_name FROM stored_files WHERE id=$1', [fileId]);
+        if (!f.rows[0] || f.rows[0].room !== room) return;
+      }
       const q = await pool.query(`
         INSERT INTO chat_messages(room,user_id,name,text,file_url,mime,file_name)
         VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,user_id,name,text,file_url,mime,file_name,created_at`,
         [room, user.id, user.name, text, fileUrl, mime, fileName]);
       io.to(room).emit('chat', { ...formatMessage(q.rows[0]), room });
     } catch (e) { console.error(e); socket.emit('app_error', 'মেসেজ সংরক্ষণ করা যায়নি।'); }
+  });
+
+  socket.on('delete_message', async data => {
+    try {
+      const id = String(data?.id || '').replace(/^db-/, '');
+      if (!/^\d+$/.test(id)) return;
+      const q = await pool.query('SELECT id,room,user_id,file_url FROM chat_messages WHERE id=$1', [id]);
+      const m = q.rows[0];
+      if (!m || String(m.user_id) !== String(user.id) || !(await validRoomForUser(m.room, user.id))) return;
+      await pool.query('DELETE FROM chat_messages WHERE id=$1', [id]);
+      const fileId = String(m.file_url || '').match(/^\/api\/files\/(\d+)$/)?.[1];
+      if (fileId) await pool.query('DELETE FROM stored_files WHERE id=$1 AND owner_id=$2', [fileId, user.id]);
+      io.to(m.room).emit('message_deleted', { id: 'db-' + id, room: m.room });
+    } catch (e) { console.error('Delete message error:', e); socket.emit('app_error', 'মেসেজ মুছতে সমস্যা হয়েছে।'); }
   });
 
   socket.on('signal', async data => {
@@ -297,7 +375,7 @@ io.on('connection', socket => {
       }
     } catch (e) { socket.emit('app_error', 'কল সিগন্যাল পাঠানো যায়নি।'); }
   });
-  socket.on('disconnect', () => {});
+  socket.on('disconnect', () => { const n=(onlineUsers.get(uid)||1)-1; if(n<=0) onlineUsers.delete(uid); else onlineUsers.set(uid,n); emitPresence(); });
 });
 
 init().then(() => server.listen(PORT, '0.0.0.0', () => console.log('Friends Club running on ' + PORT)))
