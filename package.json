@@ -2,7 +2,7 @@
   "name": "friends-club",
   "version": "0.3.0",
   "private": true,
-  "description": "Friends Club chat application with user accounts and persistent chat history",
+  "description": "Friends Club chat with PWA and web push notifications",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -14,6 +14,7 @@
     "express-session": "^1.18.1",
     "multer": "^2.0.2",
     "pg": "^8.16.3",
-    "socket.io": "^4.8.1"
+    "socket.io": "^4.8.1",
+    "web-push": "^3.6.7"
   }
 }
