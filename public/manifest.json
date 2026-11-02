@@ -1,4 +1,3 @@
-
 {
   "id": "/",
   "name": "Friends Club",
@@ -23,5 +22,6 @@
       "type": "image/png",
       "purpose": "any"
     }
-  ]
+  ],
+  "prefer_related_applications": false
 }
