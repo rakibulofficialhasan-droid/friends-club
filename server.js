@@ -1,6 +1,8 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
+let webpush = null; try { webpush = require('web-push'); } catch {}
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
@@ -78,6 +80,11 @@ async function init() {
     );
     CREATE INDEX IF NOT EXISTS chat_messages_room_id_idx ON chat_messages(room, id DESC);
     ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      endpoint TEXT UNIQUE NOT NULL, subscription JSONB NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS push_subscriptions_user_idx ON push_subscriptions(user_id);
     CREATE TABLE IF NOT EXISTS stored_files (
       id BIGSERIAL PRIMARY KEY, owner_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
       room VARCHAR(140) NOT NULL, file_name VARCHAR(200) NOT NULL, mime VARCHAR(100) NOT NULL,
@@ -85,6 +92,29 @@ async function init() {
     );
     CREATE INDEX IF NOT EXISTS stored_files_room_idx ON stored_files(room, id);
   `);
+}
+
+
+app.get('/api/push/public-key', requireLogin, (req, res) => {
+  res.json({ key: process.env.VAPID_PUBLIC_KEY || '' });
+});
+app.post('/api/push/subscribe', requireLogin, async (req, res) => {
+  try {
+    const sub = req.body?.subscription;
+    if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) return res.status(400).json({ error: 'Push subscription সঠিক নয়।' });
+    await pool.query('INSERT INTO push_subscriptions(user_id,endpoint,subscription) VALUES($1,$2,$3) ON CONFLICT(endpoint) DO UPDATE SET user_id=EXCLUDED.user_id,subscription=EXCLUDED.subscription', [req.session.user.id, sub.endpoint, JSON.stringify(sub)]);
+    res.json({ ok: true, configured: !!(webpush && process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) });
+  } catch (e) { console.error('Push subscribe:', e); res.status(500).json({ error: 'Push subscription সংরক্ষণ হয়নি।' }); }
+});
+app.post('/api/push/unsubscribe', requireLogin, async (req, res) => {
+  try { const endpoint = String(req.body?.endpoint || ''); await pool.query('DELETE FROM push_subscriptions WHERE user_id=$1 AND endpoint=$2', [req.session.user.id, endpoint]); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: 'Push বন্ধ করা যায়নি।' }); }
+});
+async function sendPushToUser(userId, payload) {
+  if (!webpush || !process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) return;
+  try { webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:admin@example.com', process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY); } catch { return; }
+  const q = await pool.query('SELECT id,endpoint,subscription FROM push_subscriptions WHERE user_id=$1', [userId]);
+  await Promise.all(q.rows.map(async row => { try { await webpush.sendNotification(row.subscription, JSON.stringify(payload)); } catch (e) { if (e.statusCode === 404 || e.statusCode === 410) pool.query('DELETE FROM push_subscriptions WHERE id=$1',[row.id]).catch(()=>{}); } }));
 }
 
 app.get('/api/me', (req, res) => res.json({ user: req.session.user || null }));
@@ -275,6 +305,7 @@ function emitPresence() { io.emit('presence', Array.from(onlineUsers.keys())); }
 io.on('connection', socket => {
   const user = socket.data.user;
   const uid = String(user.id);
+  socket.join('user:' + uid);
   onlineUsers.set(uid, (onlineUsers.get(uid) || 0) + 1);
   emitPresence();
   socket.emit('presence', Array.from(onlineUsers.keys()));
@@ -342,7 +373,15 @@ io.on('connection', socket => {
         INSERT INTO chat_messages(room,user_id,name,text,file_url,mime,file_name)
         VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,user_id,name,text,file_url,mime,file_name,created_at`,
         [room, user.id, user.name, text, fileUrl, mime, fileName]);
-      io.to(room).emit('chat', { ...formatMessage(q.rows[0]), room });
+      const message = { ...formatMessage(q.rows[0]), room };
+      io.to(room).emit('chat', message);
+      let recipients = [];
+      if (room.startsWith('dm:')) recipients = room.slice(3).split(':').filter(id => id !== uid);
+      else { const rq = await pool.query('SELECT id FROM users WHERE id<>$1',[user.id]); recipients = rq.rows.map(r=>String(r.id)); }
+      for (const recipient of recipients) {
+        const isOnline = onlineUsers.has(String(recipient));
+        if (!isOnline) await sendPushToUser(recipient, { title: user.name + ' থেকে নতুন মেসেজ', body: text || 'একটি ফাইল পাঠানো হয়েছে।', url: '/', tag: 'chat-' + room });
+      }
     } catch (e) { console.error(e); socket.emit('app_error', 'মেসেজ সংরক্ষণ করা যায়নি।'); }
   });
 
@@ -354,29 +393,4 @@ io.on('connection', socket => {
       const m = q.rows[0];
       if (!m || String(m.user_id) !== String(user.id) || !(await validRoomForUser(m.room, user.id))) return;
       await pool.query('DELETE FROM chat_messages WHERE id=$1', [id]);
-      const fileId = String(m.file_url || '').match(/^\/api\/files\/(\d+)$/)?.[1];
-      if (fileId) await pool.query('DELETE FROM stored_files WHERE id=$1 AND owner_id=$2', [fileId, user.id]);
-      io.to(m.room).emit('message_deleted', { id: 'db-' + id, room: m.room });
-    } catch (e) { console.error('Delete message error:', e); socket.emit('app_error', 'মেসেজ মুছতে সমস্যা হয়েছে।'); }
-  });
-
-  socket.on('signal', async data => {
-    try {
-      const room = socket.data.room;
-      if (!room || !data || typeof data !== 'object') return;
-      if (room.startsWith('dm:')) {
-        const ids = room.slice(3).split(':');
-        if (!ids.includes(String(user.id))) return;
-        const otherId = ids.find(id => id !== String(user.id));
-        if (!otherId || !(await areFriends(user.id, otherId))) return;
-        socket.to(room).emit('signal', { ...data, from: socket.id });
-      } else {
-        socket.emit('app_error', 'ব্যক্তিগত চ্যাট খুলে কল শুরু করো।');
-      }
-    } catch (e) { socket.emit('app_error', 'কল সিগন্যাল পাঠানো যায়নি।'); }
-  });
-  socket.on('disconnect', () => { const n=(onlineUsers.get(uid)||1)-1; if(n<=0) onlineUsers.delete(uid); else onlineUsers.set(uid,n); emitPresence(); });
-});
-
-init().then(() => server.listen(PORT, '0.0.0.0', () => console.log('Friends Club running on ' + PORT)))
-  .catch(e => { console.error('DB init failed', e); process.exit(1); });
+      const 
